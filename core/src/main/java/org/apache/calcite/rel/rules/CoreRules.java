@@ -164,6 +164,13 @@ public class CoreRules {
   public static final AggregateJoinRemoveRule AGGREGATE_JOIN_REMOVE =
       AggregateJoinRemoveRule.Config.DEFAULT.toRule();
 
+  /** Rule that fuses two sibling {@link Aggregate}s that are the right inputs
+   * of two stacked left {@link Join}s to a common driver on the same key,
+   * merging them into a single aggregate and collapsing the two joins into
+   * one. */
+  public static final AggregateJoinFusionRule AGGREGATE_JOIN_FUSION =
+      AggregateJoinFusionRule.Config.DEFAULT.toRule();
+
   /** Rule that pushes an {@link Aggregate}
    * past a {@link Join}. */
   public static final AggregateJoinTransposeRule AGGREGATE_JOIN_TRANSPOSE =
