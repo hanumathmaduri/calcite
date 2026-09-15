@@ -8425,6 +8425,65 @@ class RelOptRulesTest extends RelOptTestBase {
    * <a href="https://issues.apache.org/jira/browse/CALCITE-2712">[CALCITE-2712]
    * Should remove the left join since the aggregate has no call and
    * only uses column in the left input of the bottom join as group key</a>. */
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5631">[CALCITE-5631]
+   * Optimization to merge redundant joins</a>. Two correlated scalar
+   * sub-queries over the same table decorrelate into two aggregates joined to
+   * the driver on the same key; {@link CoreRules#AGGREGATE_JOIN_FUSION} merges
+   * them into a single aggregate and collapses the two joins into one. */
+  @Test void testAggregateJoinFusion() {
+    final String sql = "select\n"
+        + "  (select sum(e2.sal) from sales.emp e2 where e2.deptno = e.deptno),\n"
+        + "  (select sum(e2.comm) from sales.emp e2 where e2.deptno = e.deptno)\n"
+        + "from sales.emp e";
+    sql(sql)
+        .withExpand(true)
+        .withDecorrelate(true)
+        .withRule(CoreRules.AGGREGATE_JOIN_FUSION, CoreRules.PROJECT_MERGE)
+        .check();
+  }
+
+  /** As {@link #testAggregateJoinFusion()} but the two grouped sub-queries are
+   * joined explicitly with INNER joins; they fuse into one INNER join. */
+  @Test void testAggregateJoinFusionInnerJoins() {
+    final String sql = "select x.s1, y.s2 from sales.emp e\n"
+        + "join (select deptno, sum(sal) s1 from sales.emp group by deptno) x\n"
+        + "  on x.deptno = e.deptno\n"
+        + "join (select deptno, sum(comm) s2 from sales.emp group by deptno) y\n"
+        + "  on y.deptno = e.deptno";
+    sql(sql)
+        .withRule(CoreRules.AGGREGATE_JOIN_FUSION, CoreRules.PROJECT_MERGE)
+        .check();
+  }
+
+  /** A mix of INNER and LEFT joins to grouped sub-queries of the same table
+   * fuses into a single INNER join. */
+  @Test void testAggregateJoinFusionMixedJoins() {
+    final String sql = "select x.s1, y.s2 from sales.emp e\n"
+        + "join (select deptno, sum(sal) s1 from sales.emp group by deptno) x\n"
+        + "  on x.deptno = e.deptno\n"
+        + "left join (select deptno, sum(comm) s2 from sales.emp group by deptno) y\n"
+        + "  on y.deptno = e.deptno";
+    sql(sql)
+        .withRule(CoreRules.AGGREGATE_JOIN_FUSION, CoreRules.PROJECT_MERGE)
+        .check();
+  }
+
+  /** Two fusable grouped sub-queries of the same table with an unrelated
+   * sub-query interleaved between them: the fusable pair still merges. */
+  @Test void testAggregateJoinFusionInterleaved() {
+    final String sql = "select x.s1, u.c, z.s2 from sales.emp e\n"
+        + "join (select deptno, sum(sal) s1 from sales.emp group by deptno) x\n"
+        + "  on x.deptno = e.deptno\n"
+        + "join (select deptno, count(*) c from sales.dept group by deptno) u\n"
+        + "  on u.deptno = e.deptno\n"
+        + "join (select deptno, sum(comm) s2 from sales.emp group by deptno) z\n"
+        + "  on z.deptno = e.deptno";
+    sql(sql)
+        .withRule(CoreRules.AGGREGATE_JOIN_FUSION, CoreRules.PROJECT_MERGE)
+        .check();
+  }
+
   @Test void testAggregateJoinRemove1() {
     final String sql = "select distinct e.deptno from sales.emp e\n"
         + "left outer join sales.dept d on e.deptno = d.deptno";
