@@ -728,4 +728,383 @@ EnumerableCalc(expr#0=[{inputs}], expr#1=[null:INTEGER], ID=[$t1], ID0=[$t0])
 !plan
 !set planner-rules original
 
+# [AGGREGATE_SELF_JOIN_TO_MIN_MAX]
+!use scott
+!set planner-rules "
++CoreRules.AGGREGATE_SELF_JOIN_TO_MIN_MAX,
++CoreRules.EXISTENCE_SELF_JOIN_TO_MIN_MAX,
++CoreRules.EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX,
++CoreRules.EXISTENCE_BELOW_JOIN_SELF_JOIN_TO_MIN_MAX"
+
+# Q95 shape: DISTINCT key of a self-join with key equality and value inequality
+select distinct e1.deptno
+from emp e1, emp e2
+where e1.deptno = e2.deptno and e1.job <> e2.job;
++--------+
+| DEPTNO |
++--------+
+|     10 |
+|     20 |
+|     30 |
++--------+
+(3 rows)
+
+!ok
+EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+  EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+    EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# Self-join consumed through IN, as in TPC-DS query 95
+select dname from dept
+where deptno in (
+  select e1.deptno from emp e1, emp e2
+  where e1.deptno = e2.deptno and e1.job <> e2.job);
++------------+
+| DNAME      |
++------------+
+| ACCOUNTING |
+| RESEARCH   |
+| SALES      |
++------------+
+(3 rows)
+
+!ok
+EnumerableCalc(expr#0..1=[{inputs}], DNAME=[$t1])
+  EnumerableHashJoin(condition=[=($0, $2)], joinType=[semi])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+      EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+        EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+          EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# Self-join consumed through NOT IN. The old decorrelator expands NOT IN to
+# two aggregates over the self-join; the rule replaces the one that computes
+# LITERAL_AGG but not the one that computes COUNT. The top-down decorrelator
+# expands NOT IN to a mark-join, which the rule handles
+select dname from dept
+where deptno not in (
+  select e1.deptno from emp e1, emp e2
+  where e1.deptno = e2.deptno and e1.job <> e2.job);
++------------+
+| DNAME      |
++------------+
+| OPERATIONS |
++------------+
+(1 row)
+
+!ok
+!if (use_old_decorr) {
+EnumerableCalc(expr#0..5=[{inputs}], expr#6=[IS NULL($t5)], expr#7=[>=($t3, $t2)], expr#8=[AND($t6, $t7)], expr#9=[0], expr#10=[=($t2, $t9)], expr#11=[OR($t8, $t10)], DNAME=[$t1], $condition=[$t11])
+  EnumerableMergeJoin(condition=[=($0, $4)], joinType=[left])
+    EnumerableNestedLoopJoin(condition=[true], joinType=[inner])
+      EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+        EnumerableTableScan(table=[[scott, DEPT]])
+      EnumerableAggregate(group=[{}], c=[COUNT()], ck=[COUNT($2)])
+        EnumerableHashJoin(condition=[AND(=($2, $5), <>($1, $4))], joinType=[inner])
+          EnumerableCalc(expr#0..7=[{inputs}], EMPNO=[$t0], JOB=[$t2], DEPTNO=[$t7])
+            EnumerableTableScan(table=[[scott, EMP]])
+          EnumerableCalc(expr#0..7=[{inputs}], EMPNO=[$t0], JOB=[$t2], DEPTNO=[$t7])
+            EnumerableTableScan(table=[[scott, EMP]])
+    EnumerableSort(sort0=[$0], dir0=[ASC])
+      EnumerableCalc(expr#0..2=[{inputs}], expr#3=[true], expr#4=[<>($t1, $t2)], DEPTNO=[$t0], i=[$t3], $condition=[$t4])
+        EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+          EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+            EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
+
+!if (use_new_decorr) {
+EnumerableCalc(expr#0..2=[{inputs}], expr#3=[NOT($t2)], DNAME=[$t1], $condition=[$t3])
+  EnumerableHashJoin(condition=[=($0, $2)], joinType=[left_mark])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+      EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+        EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+          EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
+
+# Nullable key (KING has no manager): the null group must not qualify
+select distinct e1.mgr
+from emp e1, emp e2
+where e1.mgr = e2.mgr and e1.sal <> e2.sal;
++------+
+| MGR  |
++------+
+| 7698 |
+| 7839 |
++------+
+(2 rows)
+
+!ok
+EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], MGR=[$t0], $condition=[$t3])
+  EnumerableAggregate(group=[{3}], agg#0=[MIN($5)], agg#1=[MAX($5)])
+    EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t3)], proj#0..7=[{exprs}], $condition=[$t8])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# Nullable DECIMAL value with '<'
+select distinct e1.deptno
+from emp e1, emp e2
+where e1.deptno = e2.deptno and e1.comm < e2.comm;
++--------+
+| DEPTNO |
++--------+
+|     30 |
++--------+
+(1 row)
+
+!ok
+EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+  EnumerableAggregate(group=[{7}], agg#0=[MIN($6)], agg#1=[MAX($6)])
+    EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# DATE value with '>' and operands reversed
+select distinct e2.deptno
+from emp e1, emp e2
+where e2.deptno = e1.deptno and e2.hiredate > e1.hiredate;
++--------+
+| DEPTNO |
++--------+
+|     10 |
+|     20 |
+|     30 |
++--------+
+(3 rows)
+
+!ok
+EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO0=[$t0], $condition=[$t3])
+  EnumerableAggregate(group=[{7}], agg#0=[MIN($4)], agg#1=[MAX($4)])
+    EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# Composite key, only part of it projected
+select distinct e1.deptno
+from emp e1, emp e2
+where e1.deptno = e2.deptno and e1.job = e2.job and e1.sal <> e2.sal;
++--------+
+| DEPTNO |
++--------+
+|     20 |
+|     30 |
++--------+
+(2 rows)
+
+!ok
+EnumerableAggregate(group=[{1}])
+  EnumerableCalc(expr#0..3=[{inputs}], expr#4=[<>($t2, $t3)], proj#0..3=[{exprs}], $condition=[$t4])
+    EnumerableAggregate(group=[{2, 7}], agg#0=[MIN($5)], agg#1=[MAX($5)])
+      EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t2)], expr#9=[IS NOT NULL($t7)], expr#10=[AND($t8, $t9)], proj#0..7=[{exprs}], $condition=[$t10])
+        EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# Negative: COUNT(*) is duplicate-sensitive, so the self-join must remain
+select e1.deptno, count(*) as c
+from emp e1, emp e2
+where e1.deptno = e2.deptno and e1.job <> e2.job
+group by e1.deptno;
++--------+----+
+| DEPTNO | C  |
++--------+----+
+|     10 |  6 |
+|     20 | 16 |
+|     30 | 18 |
++--------+----+
+(3 rows)
+
+!ok
+EnumerableAggregate(group=[{2}], C=[COUNT()])
+  EnumerableHashJoin(condition=[AND(=($2, $5), <>($1, $4))], joinType=[inner])
+    EnumerableCalc(expr#0..7=[{inputs}], EMPNO=[$t0], JOB=[$t2], DEPTNO=[$t7])
+      EnumerableTableScan(table=[[scott, EMP]])
+    EnumerableCalc(expr#0..7=[{inputs}], EMPNO=[$t0], JOB=[$t2], DEPTNO=[$t7])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# Correlated EXISTS; decorrelation filters null keys on one join input only,
+# which the rule ignores as the key equality rejects them anyway
+select dname from dept d
+where exists (
+  select 1 from emp e1, emp e2
+  where e1.deptno = d.deptno and e1.deptno = e2.deptno
+  and e1.job <> e2.job);
++------------+
+| DNAME      |
++------------+
+| ACCOUNTING |
+| RESEARCH   |
+| SALES      |
++------------+
+(3 rows)
+
+!ok
+!if (use_old_decorr) {
+EnumerableCalc(expr#0..1=[{inputs}], DNAME=[$t1])
+  EnumerableHashJoin(condition=[=($0, $2)], joinType=[semi])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+      EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+        EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+          EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
+
+!if (use_new_decorr) {
+EnumerableCalc(expr#0..1=[{inputs}], DNAME=[$t1])
+  EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($0, $2)], joinType=[semi])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+      EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+        EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+          EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
+
+# Correlated NOT EXISTS
+select dname from dept d
+where not exists (
+  select 1 from emp e1, emp e2
+  where e1.deptno = d.deptno and e1.deptno = e2.deptno
+  and e1.job <> e2.job);
++------------+
+| DNAME      |
++------------+
+| OPERATIONS |
++------------+
+(1 row)
+
+!ok
+!if (use_old_decorr) {
+EnumerableCalc(expr#0..3=[{inputs}], expr#4=[IS NULL($t3)], DNAME=[$t1], $condition=[$t4])
+  EnumerableMergeJoin(condition=[=($0, $2)], joinType=[left])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableSort(sort0=[$0], dir0=[ASC])
+      EnumerableCalc(expr#0..2=[{inputs}], expr#3=[true], expr#4=[<>($t1, $t2)], DEPTNO=[$t0], $f1=[$t3], $condition=[$t4])
+        EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+          EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+            EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
+
+!if (use_new_decorr) {
+EnumerableCalc(expr#0..1=[{inputs}], DNAME=[$t1])
+  EnumerableHashJoin(condition=[IS NOT DISTINCT FROM($0, $2)], joinType=[anti])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+      EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+        EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+          EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!}
+
+# '<=': every row pairs with itself, so the self-join reduces to a filter
+select distinct e1.deptno
+from emp e1, emp e2
+where e1.deptno = e2.deptno and e1.mgr <= e2.mgr;
++--------+
+| DEPTNO |
++--------+
+|     10 |
+|     20 |
+|     30 |
++--------+
+(3 rows)
+
+!ok
+EnumerableAggregate(group=[{7}])
+  EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], expr#9=[IS NOT NULL($t3)], expr#10=[AND($t8, $t9)], proj#0..7=[{exprs}], $condition=[$t10])
+    EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# IS DISTINCT FROM also holds between a null and a non-null value
+select distinct e1.deptno
+from emp e1, emp e2
+where e1.deptno = e2.deptno and e1.comm is distinct from e2.comm;
++--------+
+| DEPTNO |
++--------+
+|     30 |
++--------+
+(1 row)
+
+!ok
+EnumerableCalc(expr#0..4=[{inputs}], expr#5=[<>($t1, $t2)], expr#6=[0], expr#7=[>($t4, $t6)], expr#8=[>($t3, $t4)], expr#9=[AND($t7, $t8)], expr#10=[OR($t5, $t9)], DEPTNO=[$t0], $condition=[$t10])
+  EnumerableAggregate(group=[{7}], agg#0=[MIN($6)], agg#1=[MAX($6)], agg#2=[COUNT()], agg#3=[COUNT($6)])
+    EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+      EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+# A key compared by IS NOT DISTINCT FROM keeps the null key (KING)
+select distinct e1.mgr
+from emp e1, emp e2
+where e1.mgr is not distinct from e2.mgr and e1.deptno <> e2.deptno;
++------+
+| MGR  |
++------+
+| 7839 |
++------+
+(1 row)
+
+!ok
+EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], MGR=[$t0], $condition=[$t3])
+  EnumerableAggregate(group=[{3}], agg#0=[MIN($7)], agg#1=[MAX($7)])
+    EnumerableTableScan(table=[[scott, EMP]])
+!plan
+!set planner-rules original
+
+!set planner-rules "
++CoreRules.AGGREGATE_SELF_JOIN_TO_MIN_MAX,
++CoreRules.EXISTENCE_SELF_JOIN_TO_MIN_MAX,
++CoreRules.EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX,
++CoreRules.EXISTENCE_BELOW_JOIN_SELF_JOIN_TO_MIN_MAX,
++CoreRules.AGGREGATE_JOIN_TRANSPOSE_EXTENDED"
+
+# Shape of the second IN of TPC-DS query 95: the self-join is joined to
+# another table inside the sub-query. With the old decorrelator,
+# AGGREGATE_JOIN_TRANSPOSE_EXTENDED pushes the DISTINCT down to the self-join;
+# with the top-down decorrelator, EXISTENCE_BELOW_JOIN_SELF_JOIN_TO_MIN_MAX
+# handles the semi-join
+select dname from dept
+where deptno in (
+  select d.deptno from dept d,
+    (select e1.deptno from emp e1, emp e2
+     where e1.deptno = e2.deptno and e1.job <> e2.job) w
+  where d.deptno = w.deptno);
++------------+
+| DNAME      |
++------------+
+| ACCOUNTING |
+| RESEARCH   |
+| SALES      |
++------------+
+(3 rows)
+
+!ok
+EnumerableCalc(expr#0..1=[{inputs}], DNAME=[$t1])
+  EnumerableHashJoin(condition=[=($0, $2)], joinType=[semi])
+    EnumerableCalc(expr#0..2=[{inputs}], proj#0..1=[{exprs}])
+      EnumerableTableScan(table=[[scott, DEPT]])
+    EnumerableHashJoin(condition=[=($0, $1)], joinType=[semi])
+      EnumerableCalc(expr#0..2=[{inputs}], DEPTNO=[$t0])
+        EnumerableTableScan(table=[[scott, DEPT]])
+      EnumerableCalc(expr#0..2=[{inputs}], expr#3=[<>($t1, $t2)], DEPTNO=[$t0], $condition=[$t3])
+        EnumerableAggregate(group=[{7}], agg#0=[MIN($2)], agg#1=[MAX($2)])
+          EnumerableCalc(expr#0..7=[{inputs}], expr#8=[IS NOT NULL($t7)], proj#0..7=[{exprs}], $condition=[$t8])
+            EnumerableTableScan(table=[[scott, EMP]])
+!plan
+
+!set planner-rules original
+
 # End planner.iq

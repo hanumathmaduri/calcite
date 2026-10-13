@@ -74,6 +74,7 @@ import org.apache.calcite.rel.rules.AggregateProjectConstantToDummyJoinRule;
 import org.apache.calcite.rel.rules.AggregateProjectMergeRule;
 import org.apache.calcite.rel.rules.AggregateProjectPullUpConstantsRule;
 import org.apache.calcite.rel.rules.AggregateReduceFunctionsRule;
+import org.apache.calcite.rel.rules.AggregateSelfJoinToMinMaxRule;
 import org.apache.calcite.rel.rules.CoerceInputsRule;
 import org.apache.calcite.rel.rules.CoreRules;
 import org.apache.calcite.rel.rules.DateRangeRules;
@@ -8425,6 +8426,276 @@ class RelOptRulesTest extends RelOptTestBase {
    * <a href="https://issues.apache.org/jira/browse/CALCITE-2712">[CALCITE-2712]
    * Should remove the left join since the aggregate has no call and
    * only uses column in the left input of the bottom join as group key</a>. */
+  /** Test case for {@link AggregateSelfJoinToMinMaxRule}: the shape of the
+   * {@code ws_wh} sub-query in TPC-DS query 95. */
+  @Test void testAggregateSelfJoinToMinMax() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.job <> e2.job";
+    selfJoinToMinMax(sql).check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, but the self-join is
+   * consumed through {@code IN}, whose expansion supplies the
+   * duplicate-eliminating aggregate. */
+  @Test void testAggregateSelfJoinToMinMaxInSubQuery() {
+    final String sql = "select empno from sales.emp\n"
+        + "where deptno in (\n"
+        + "  select e1.deptno from sales.emp e1, sales.emp e2\n"
+        + "  where e1.deptno = e2.deptno and e1.job <> e2.job)";
+    selfJoinToMinMax(sql)
+        .withPreRule(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
+            CoreRules.FILTER_INTO_JOIN, CoreRules.PROJECT_MERGE,
+            CoreRules.AGGREGATE_PROJECT_MERGE)
+        .check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, with {@code <} rather than
+   * {@code <>}, and the operands of the inequality reversed. */
+  @Test void testAggregateSelfJoinToMinMaxLessThan() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e2.sal < e1.sal";
+    selfJoinToMinMax(sql).check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, with a composite key of
+   * which only one column is projected, so a final {@code DISTINCT} is
+   * needed. */
+  @Test void testAggregateSelfJoinToMinMaxCompositeKey() {
+    final String sql = "select distinct e2.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.mgr = e2.mgr\n"
+        + "and e1.job <> e2.job";
+    selfJoinToMinMax(sql).check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, but the self-join is joined
+   * to another table below the {@code DISTINCT}, as in the second {@code IN}
+   * of TPC-DS query 95. {@link CoreRules#AGGREGATE_JOIN_TRANSPOSE_EXTENDED}
+   * pushes the {@code DISTINCT} down to the self-join. */
+  @Test void testAggregateSelfJoinToMinMaxBelowJoin() {
+    final String sql = "select empno from sales.emp\n"
+        + "where deptno in (\n"
+        + "  select d.deptno from sales.dept d,\n"
+        + "    (select e1.deptno from sales.emp e1, sales.emp e2\n"
+        + "     where e1.deptno = e2.deptno and e1.job <> e2.job) w\n"
+        + "  where d.deptno = w.deptno)";
+    selfJoinToMinMax(sql)
+        .withPreRule(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
+            CoreRules.FILTER_INTO_JOIN, CoreRules.PROJECT_MERGE,
+            CoreRules.AGGREGATE_PROJECT_MERGE)
+        .withRule(CoreRules.AGGREGATE_JOIN_TRANSPOSE_EXTENDED,
+            CoreRules.AGGREGATE_PROJECT_MERGE,
+            CoreRules.AGGREGATE_SELF_JOIN_TO_MIN_MAX)
+        .check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, with {@code <=}. Every row
+   * pairs with itself, so the self-join reduces to a filter. */
+  @Test void testAggregateSelfJoinToMinMaxLessThanOrEqual() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.mgr <= e2.mgr";
+    selfJoinToMinMax(sql).check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, with
+   * {@code IS DISTINCT FROM} (which {@code SqlToRelConverter} expands), which
+   * also holds between a null and a non-null value. */
+  @Test void testAggregateSelfJoinToMinMaxIsDistinctFrom() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno\n"
+        + "and e1.mgr is distinct from e2.mgr";
+    selfJoinToMinMax(sql).check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMax()}, with a key compared by
+   * {@code IS NOT DISTINCT FROM}, which keeps the null key, as
+   * {@code GROUP BY} does. */
+  @Test void testAggregateSelfJoinToMinMaxNullSafeKey() {
+    final String sql = "select distinct e1.mgr\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.mgr is not distinct from e2.mgr and e1.job <> e2.job";
+    selfJoinToMinMax(sql).check();
+  }
+
+  /** As {@link #testAggregateSelfJoinToMinMaxInSubQuery()}, with
+   * {@code NOT IN}, which {@link SubQueryRemoveRule} expands to two
+   * aggregates over the self-join. The rule replaces the one that computes
+   * {@code LITERAL_AGG}, but not the one that computes {@code COUNT}. */
+  @Test void testAggregateSelfJoinToMinMaxNotIn() {
+    final String sql = "select empno from sales.emp\n"
+        + "where deptno not in (\n"
+        + "  select e1.deptno from sales.emp e1, sales.emp e2\n"
+        + "  where e1.deptno = e2.deptno and e1.job <> e2.job)";
+    selfJoinToMinMax(sql)
+        .withPreRule(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
+            CoreRules.FILTER_INTO_JOIN, CoreRules.PROJECT_MERGE,
+            CoreRules.AGGREGATE_PROJECT_MERGE)
+        .check();
+  }
+
+  /** Test case for
+   * {@link AggregateSelfJoinToMinMaxRule.Config#EXISTENCE_BELOW_JOIN}: the
+   * expansion of the second {@code IN} of TPC-DS query 95 by the top-down
+   * decorrelator, a semi-join whose right input is a projection of a join of
+   * another table with the self-join. */
+  @Test void testExistenceSelfJoinToMinMaxBelowJoin() {
+    relFn(b -> {
+      b.scan("DEPT");
+      b.scan("DEPT");
+      selfJoinProjected(b)
+          .join(JoinRelType.INNER,
+              b.equals(b.field(2, 0, "DEPTNO"), b.field(2, 1, "DEPTNO")))
+          .project(b.field(0));
+      return b.semiJoin(
+              b.equals(b.field(2, 0, "DEPTNO"), b.field(2, 1, 0)))
+          .build();
+    })
+        .withRule(CoreRules.EXISTENCE_BELOW_JOIN_SELF_JOIN_TO_MIN_MAX)
+        .check();
+  }
+
+  /** The key is approximate numeric, so {@code GROUP BY} need not agree with
+   * {@code =} (for example on -0.0 and 0.0); the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxApproximateKey() {
+    final String sql = "select distinct e1.d\n"
+        + "from (select cast(deptno as double) d, job from sales.emp) e1,\n"
+        + "  (select cast(deptno as double) d, job from sales.emp) e2\n"
+        + "where e1.d = e2.d and e1.job <> e2.job";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** The aggregate computes {@code COUNT(*)}, so it is not
+   * duplicate-insensitive; the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxWithAggCall() {
+    final String sql = "select e1.deptno, count(*)\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.job <> e2.job\n"
+        + "group by e1.deptno";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** The join inputs differ (a filter on one side only); the rule must not
+   * fire. */
+  @Test void testAggregateSelfJoinToMinMaxDifferentInputs() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, (select * from sales.emp where sal > 1000) e2\n"
+        + "where e1.deptno = e2.deptno and e1.job <> e2.job";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** Two inequalities need not hold on the same pair of rows, so they cannot
+   * be checked by independent extrema; the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxTwoInequalities() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.job <> e2.job\n"
+        + "and e1.sal <> e2.sal";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** The inequality compares different columns; the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxDifferentColumns() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.job <> e2.ename";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** The aggregate groups by a non-key column; the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxNonKeyGroup() {
+    final String sql = "select distinct e1.job\n"
+        + "from sales.emp e1, sales.emp e2\n"
+        + "where e1.deptno = e2.deptno and e1.job <> e2.job";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** The value column is approximate numeric, whose {@code <>} is not
+   * consistent with its ordering (NaN, -0.0); the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxApproximateValue() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from (select deptno, cast(sal as double) d from sales.emp) e1,\n"
+        + "  (select deptno, cast(sal as double) d from sales.emp) e2\n"
+        + "where e1.deptno = e2.deptno and e1.d <> e2.d";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** An outer self-join is not handled; the rule must not fire. */
+  @Test void testAggregateSelfJoinToMinMaxLeftJoin() {
+    final String sql = "select distinct e1.deptno\n"
+        + "from sales.emp e1 left join sales.emp e2\n"
+        + "on e1.deptno = e2.deptno and e1.job <> e2.job";
+    selfJoinToMinMax(sql).checkUnchanged();
+  }
+
+  /** Test case for {@link AggregateSelfJoinToMinMaxRule.Config#EXISTENCE}: a
+   * semi-join (the expansion of {@code IN} by the top-down decorrelator) whose
+   * right input is a projection of the self-join. The projection has a
+   * non-key column that the semi-join does not reference, so the condition
+   * must be remapped. */
+  @Test void testExistenceSelfJoinToMinMaxSemiJoin() {
+    relFn(b -> selfJoinProjected(b.scan("DEPT"))
+        .semiJoin(
+            b.equals(b.field(2, 0, "DEPTNO"), b.field(2, 1, "DEPTNO")))
+        .build())
+        .withRule(CoreRules.EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX)
+        .check();
+  }
+
+  /** As {@link #testExistenceSelfJoinToMinMaxSemiJoin()}, for an anti-join
+   * with a non-equi condition. */
+  @Test void testExistenceSelfJoinToMinMaxAntiJoin() {
+    relFn(b -> selfJoinProjected(b.scan("DEPT"))
+        .antiJoin(
+            b.greaterThan(b.field(2, 0, "DEPTNO"), b.field(2, 1, "DEPTNO")))
+        .build())
+        .withRule(CoreRules.EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX)
+        .check();
+  }
+
+  /** As {@link #testExistenceSelfJoinToMinMaxSemiJoin()}, for a mark-join
+   * (the expansion of {@code NOT IN} by the top-down decorrelator). */
+  @Test void testExistenceSelfJoinToMinMaxMarkJoin() {
+    relFn(b -> selfJoinProjected(b.scan("DEPT"))
+        .join(JoinRelType.LEFT_MARK,
+            b.equals(b.field(2, 0, "DEPTNO"), b.field(2, 1, "DEPTNO")))
+        .build())
+        .withRule(CoreRules.EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX)
+        .check();
+  }
+
+  /** The semi-join tests a non-key column of the self-join; the rule must not
+   * fire. */
+  @Test void testExistenceSelfJoinToMinMaxNonKey() {
+    relFn(b -> selfJoinProjected(b.scan("DEPT"))
+        .semiJoin(
+            b.equals(b.field(2, 0, "DNAME"), b.field(2, 1, "JOB")))
+        .build())
+        .withRule(CoreRules.EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX)
+        .checkUnchanged();
+  }
+
+  /** Pushes {@code EMP e1, EMP e2 WHERE e1.deptno = e2.deptno AND
+   * e1.job <> e2.job}, projected to {@code (e1.job, e2.deptno)}. */
+  private static RelBuilder selfJoinProjected(RelBuilder b) {
+    return b.scan("EMP").as("e1")
+        .scan("EMP").as("e2")
+        .join(JoinRelType.INNER,
+            b.equals(b.field(2, "e1", "DEPTNO"), b.field(2, "e2", "DEPTNO")),
+            b.notEquals(b.field(2, "e1", "JOB"), b.field(2, "e2", "JOB")))
+        .project(b.field("e1", "JOB"), b.field("e2", "DEPTNO"));
+  }
+
+  private RelOptFixture selfJoinToMinMax(String sql) {
+    return sql(sql)
+        .withPreRule(CoreRules.FILTER_INTO_JOIN, CoreRules.PROJECT_MERGE,
+            CoreRules.AGGREGATE_PROJECT_MERGE)
+        .withRule(CoreRules.AGGREGATE_SELF_JOIN_TO_MIN_MAX);
+  }
+
   @Test void testAggregateJoinRemove1() {
     final String sql = "select distinct e.deptno from sales.emp e\n"
         + "left outer join sales.dept d on e.deptno = d.deptno";

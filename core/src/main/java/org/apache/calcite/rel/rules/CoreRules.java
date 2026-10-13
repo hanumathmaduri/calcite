@@ -164,6 +164,40 @@ public class CoreRules {
   public static final AggregateJoinRemoveRule AGGREGATE_JOIN_REMOVE =
       AggregateJoinRemoveRule.Config.DEFAULT.toRule();
 
+  /** Rule that matches an {@link Aggregate} that groups by key columns (and
+   * computes nothing but {@code LITERAL_AGG}) on an inner self-{@link Join}
+   * whose condition equates the keys and compares a value, and replaces the
+   * join with {@code GROUP BY key HAVING MIN(value) <> MAX(value)}.
+   *
+   * @see AggregateSelfJoinToMinMaxRule */
+  public static final AggregateSelfJoinToMinMaxRule
+      AGGREGATE_SELF_JOIN_TO_MIN_MAX =
+      AggregateSelfJoinToMinMaxRule.Config.DEFAULT.toRule();
+
+  /** As {@link #AGGREGATE_SELF_JOIN_TO_MIN_MAX}, but for a semi-, anti- or
+   * mark-{@link Join} whose right input is the self-join.
+   *
+   * @see AggregateSelfJoinToMinMaxRule.Config#EXISTENCE */
+  public static final AggregateSelfJoinToMinMaxRule
+      EXISTENCE_SELF_JOIN_TO_MIN_MAX =
+      AggregateSelfJoinToMinMaxRule.Config.EXISTENCE.toRule();
+
+  /** As {@link #EXISTENCE_SELF_JOIN_TO_MIN_MAX}, but the right input of the
+   * semi-, anti- or mark-{@link Join} is a projection of the self-join.
+   *
+   * @see AggregateSelfJoinToMinMaxRule.Config#EXISTENCE_PROJECT */
+  public static final AggregateSelfJoinToMinMaxRule
+      EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX =
+      AggregateSelfJoinToMinMaxRule.Config.EXISTENCE_PROJECT.toRule();
+
+  /** As {@link #EXISTENCE_PROJECT_SELF_JOIN_TO_MIN_MAX}, but the self-join is
+   * an input of an inner join below the semi-, anti- or mark-{@link Join}.
+   *
+   * @see AggregateSelfJoinToMinMaxRule.Config#EXISTENCE_BELOW_JOIN */
+  public static final AggregateSelfJoinToMinMaxRule
+      EXISTENCE_BELOW_JOIN_SELF_JOIN_TO_MIN_MAX =
+      AggregateSelfJoinToMinMaxRule.Config.EXISTENCE_BELOW_JOIN.toRule();
+
   /** Rule that pushes an {@link Aggregate}
    * past a {@link Join}. */
   public static final AggregateJoinTransposeRule AGGREGATE_JOIN_TRANSPOSE =
